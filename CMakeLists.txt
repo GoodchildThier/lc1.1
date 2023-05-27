@@ -396,6 +396,8 @@ endif()
 add_library(ggml OBJECT
             ggml.c
             ggml.h
+            k_quants.h
+            k_quants.c
             ${GGML_SOURCES_CUDA}
             ${GGML_SOURCES_OPENCL}
             ${GGML_SOURCES_METAL}
