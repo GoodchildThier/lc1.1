@@ -546,6 +546,8 @@ struct llama_file_loader {
                 case GGML_TYPE_Q4_K:
                 case GGML_TYPE_Q5_K:
                 case GGML_TYPE_Q6_K:
+                case GGML_TYPE_Q4_K_F:
+                case GGML_TYPE_Q8_K_F:
                     break;
                 default: {
                     throw std::runtime_error(format("unrecognized tensor type %u\n", shard.type));
@@ -626,6 +628,8 @@ struct llama_file_saver {
             case GGML_TYPE_Q4_K:
             case GGML_TYPE_Q5_K:
             case GGML_TYPE_Q6_K:
+            case GGML_TYPE_Q4_K_F:
+            case GGML_TYPE_Q8_K_F:
                 break;
             default: LLAMA_ASSERT(false);
         }
@@ -1009,6 +1013,8 @@ static const char *llama_ftype_name(enum llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_Q5_K_S: return "mostly Q5_K - Small";
         case LLAMA_FTYPE_MOSTLY_Q5_K_M: return "mostly Q5_K - Medium";
         case LLAMA_FTYPE_MOSTLY_Q6_K: return "mostly Q6_K";
+        case LLAMA_FTYPE_MOSTLY_Q4_K_F: return "mostly Q4_K_F";
+        case LLAMA_FTYPE_MOSTLY_Q8_K_F: return "mostly Q8_K_F";
         default:                      return "unknown, may not work";
     }
 }
@@ -2421,6 +2427,8 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         case LLAMA_FTYPE_MOSTLY_Q5_K_S:
         case LLAMA_FTYPE_MOSTLY_Q5_K_M: quantized_type = GGML_TYPE_Q5_K; break;
         case LLAMA_FTYPE_MOSTLY_Q6_K:   quantized_type = GGML_TYPE_Q6_K; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_K_F: quantized_type = GGML_TYPE_Q4_K_F; break;
+        case LLAMA_FTYPE_MOSTLY_Q8_K_F: quantized_type = GGML_TYPE_Q8_K_F; break;
 #endif
         default: throw std::runtime_error(format("invalid output file type %d\n", ftype));
     }
@@ -2449,6 +2457,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
     int i_feed_forward_w2 = 0;
 #endif
 
+    bool isQ8 = quantized_type == GGML_TYPE_Q8_0 || quantized_type == GGML_TYPE_Q8_1 || quantized_type == GGML_TYPE_Q8_K_F;
     size_t total_size_org = 0;
     size_t total_size_new = 0;
     std::vector<int64_t> hist_all(1 << 4, 0);
@@ -2489,7 +2498,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         } else {
             new_type = quantized_type;
 #ifdef GGML_USE_K_QUANTS
-            if (tensor.name == "output.weight") {
+            if (!isQ8 && tensor.name == "output.weight") {
                new_type = GGML_TYPE_Q6_K;
             } else if (tensor.name.find("attention.wv.weight") != std::string::npos) {
                 if      (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M || ftype == LLAMA_FTYPE_MOSTLY_Q2_K) new_type = GGML_TYPE_Q4_K;
