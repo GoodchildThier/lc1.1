@@ -731,7 +731,7 @@ static __global__ void dequantize_mul_mat_vec_q4_K_F(const void * vx, const floa
     const int im = tid/step;                             // 0 or 1. 0 computes 0..., 1 computes 128...
     const int il = tid - step*im;                        // 0...15 or 0...7
 
-    const int n   = 2;
+    const int n   = 2 * K_QUANTS_PER_ITERATION;
 
     const int l0 = n * il;
     const int q_offset =  64*im + l0;
