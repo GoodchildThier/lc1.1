@@ -396,37 +396,34 @@ kernel void kernel_mul_mat_q4_K_F_f32(
     const int nth = tptg.x*tptg.y;
     const int ith = tptg.y*tpitg.x + tpitg.y;
 
-    const int ix = tpitg.y/4;           // 0 or 1
-    const int iy = tpitg.y - 4*ix;      // 0...3
+    const int ix = tpitg.y/2;           // 0...3
+    const int iy = tpitg.y - 2*ix;      // 0 or 1
 
-    const int q_offset = 4 * tpitg.x + 32 * iy;
-    const int y_offset = 4 * tpitg.x + 64 * iy;
+    const int it = 8 * iy + tpitg.x;    // 0...15
+    const int il = it/8;                // 0...1
+    const int ir = it - 8*il;           // 0...7
+    const int q_offset = 4 * ir +  64 * il;
+    const int y_offset = 4 * ir + 128 * il;
 
     float sumf = 0;
 
-    for (int i = ix; i < nb; i += 2) {
+    for (int i = ix; i < nb; i += 4) {
 
-        //const float d1 = (float)x[i].d[2*iy + 0];
-        //const float d2 = (float)x[i].d[2*iy + 1];
-        device const half2 * d = (device const half2 *)x[i].d + iy;
+        device const half2 * d = (device const half2 *)x[i].d + 2*il;
 
         device const uint8_t * ql = x[i].qs + q_offset;
         device const float   * yl = y + i * QK_K + y_offset;
 
-        float2 acc = {0.0f, 0.0f};
+        float2 acc0 = {0.0f, 0.0f};
+        float2 acc1 = {0.0f, 0.0f};
 
         for (int j = 0; j < 4; ++j) {
-
-            //acc[0] += yl[j] * d1 * (ql[j] & 0xF) + yl[j+32] * d2 * (ql[j] >> 4);
-            //acc[1] += d1 * yl[j] + d2 * yl[j+32];
-
-            acc[0] += yl[j+ 0] * ((int8_t)(ql[j] & 0xF) - 8);
-            acc[1] += yl[j+32] * ((int8_t)(ql[j] >>  4) - 8);
-
+            acc0.x += yl[j+ 0] * ((int8_t)(ql[j] & 0xF) - 8);
+            acc0.y += yl[j+32] * ((int8_t)(ql[j] >>  4) - 8);
+            acc1.x += yl[j+64] * ((int8_t)(ql[j+32] & 0xF) - 8);
+            acc1.y += yl[j+96] * ((int8_t)(ql[j+32] >>  4) - 8);
         }
-
-        //sumf += acc[0] - 8.f*acc[1];
-        sumf += acc[0] * d[0].x + acc[1] * d[0].y;
+        sumf += acc0.x * d[0].x + acc0.y * d[0].y + acc1.x * d[1].x + acc1.y * d[1].y;
     }
 
     sum[ith] = sumf;
