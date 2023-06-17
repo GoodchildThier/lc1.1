@@ -713,27 +713,33 @@ static __global__ void dequantize_mul_mat_vec_q4_k(const void * vx, const float 
     }
 }
 
-static __global__ void dequantize_mul_mat_vec_q4_K_F(const void * vx, const float * yy, float * dst, const int ncols) {
+static __global__ void dequantize_mul_mat_vec_q4_K_F(const void * vx, const float * yy, float * dst, const int ncols, int nrows) {
 
-    const int row = blockIdx.x;
+    const int row = blockIdx.y*blockDim.y + threadIdx.y;
+    if (row > nrows) return;
+
     const int num_blocks_per_row = ncols / QK_K;
     const int ib0 = row*num_blocks_per_row;
 
-    const int tid = threadIdx.x;  // 0...31
+    const block_q4_K_F * x = (const block_q4_K_F *)vx + ib0;
 
-    const int im  = tid/16;     // 0 or 1
-    const int il  = tid%16;     // 0...15
+    const int tid = threadIdx.x/K_QUANTS_PER_ITERATION;  // 0...31 or 0...16
+    const int ix  = threadIdx.x%K_QUANTS_PER_ITERATION;  // 0 or 0, 1
+
+    const int step = 16/K_QUANTS_PER_ITERATION;          // 16 or 8
+
+    const int im = tid/step;                             // 0 or 1. 0 computes 0..., 1 computes 128...
+    const int il = tid - step*im;                        // 0...15 or 0...7
+
     const int n   = 2;
 
     const int l0 = n * il;
     const int q_offset =  64*im + l0;
     const int y_offset = 128*im + l0;
 
-    const block_q4_K_F * x = (const block_q4_K_F *)vx + ib0;
-
     float tmp = 0; // partial sum for thread in warp
 
-    for (int i = 0; i < num_blocks_per_row; i += 1) {
+    for (int i = ix; i < num_blocks_per_row; i += K_QUANTS_PER_ITERATION) {
 
         const uint8_t * q1 = x[i].qs + q_offset;
         const uint8_t * q2 = q1 + 32;
@@ -744,14 +750,16 @@ static __global__ void dequantize_mul_mat_vec_q4_K_F(const void * vx, const floa
         float2 d1 = __half22float2(dh[0]);
         float2 d2 = __half22float2(dh[1]);
 
-        //const half * d = x[i].d + 4*im;
-
-        float s = 0;
+        float2 s1 = {0.f, 0.f}, s2 = {0.f, 0.f};
+        float smin = 0;
         for (int l = 0; l < n; ++l) {
-            s += y1[l] * d1.x * ((int8_t)(q1[l] & 0xF) - 8) + y1[l+32] * d1.y * ((int8_t)(q1[l] >> 4) - 8)
-               + y2[l] * d2.x * ((int8_t)(q2[l] & 0xF) - 8) + y2[l+32] * d2.y * ((int8_t)(q2[l] >> 4) - 8);
+            s1.x += y1[l+ 0] * (q1[l] & 0xF);
+            s1.y += y1[l+32] * (q1[l] >>  4);
+            s2.x += y2[l+ 0] * (q2[l] & 0xF);
+            s2.y += y2[l+32] * (q2[l] >>  4);
+            smin += y1[l] * d1.x + y1[l+32] * d1.y + y2[l] * d2.x + y2[l+32] * d2.y;
         }
-        tmp += s;
+        tmp += s1.x * d1.x + s1.y * d1.y + s2.x * d2.x + s2.y * d2.y - 8.f*smin;
 
     }
 
@@ -1365,8 +1373,11 @@ static void dequantize_mul_mat_vec_q4_K_cuda(const void * vx, const float * y, f
 
 static void dequantize_mul_mat_vec_q4_K_F_cuda(const void * vx, const float * y, float * dst, const int ncols, const int nrows, cudaStream_t stream) {
     GGML_ASSERT(ncols % QK_K == 0);
-    const dim3 block_dims(32, 1, 1);
-    dequantize_mul_mat_vec_q4_K_F<<<nrows, block_dims, 0, stream>>>(vx, y, dst, ncols);
+    const int ny = 2 / K_QUANTS_PER_ITERATION;
+    const int block_num_y = (nrows + ny - 1) / ny;
+    const dim3 block_nums(1, block_num_y, 1);
+    const dim3 block_dims(32, ny, 1);
+    dequantize_mul_mat_vec_q4_K_F<<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols, nrows);
 }
 
 static void dequantize_mul_mat_vec_q5_K_cuda(const void * vx, const float * y, float * dst, const int ncols, const int nrows, cudaStream_t stream) {
