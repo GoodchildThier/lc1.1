@@ -18,6 +18,13 @@ typedef struct {
     uint8_t qs[QK4_1 / 2];  // nibbles / quants
 } block_q4_1;
 
+#define QK_K 256
+typedef struct {
+    half d[QK_K/32];    // super-block scales
+    uint8_t qs[QK_K/2]; // 4--bit quants
+} block_q4_K_F;
+// 144 bytes / block
+
 static void dequantize_row_q4_0(device const block_q4_0 * x, device float * y, int k) {
     const int qk = QK4_0;
 
@@ -367,6 +374,81 @@ kernel void kernel_mul_mat_q4_0_f32(
     }
 }
 
+kernel void kernel_mul_mat_q4_K_F_f32(
+        device const  void * src0,
+        device const float * src1,
+        device       float * dst,
+        constant   int64_t & ne00,
+        constant   int64_t & ne10,
+        constant   int64_t & ne0,
+        threadgroup float  * sum [[threadgroup(0)]],
+        uint2 tgpig[[threadgroup_position_in_grid]],
+        uint2 tpitg[[thread_position_in_threadgroup]],
+        uint2  tptg[[threads_per_threadgroup]]) {
+    const int nb = ne00/QK_K;
+
+    const int64_t r0 = tgpig.x;
+    const int64_t r1 = tgpig.y;
+
+    device const block_q4_K_F * x = (device const block_q4_K_F *) src0 + r0*nb;
+    device const float        * y = (device const float        *) src1 + r1*ne10;
+
+    const int nth = tptg.x*tptg.y;
+    const int ith = tptg.y*tpitg.x + tpitg.y;
+
+    const int ix = tpitg.y/4;           // 0 or 1
+    const int iy = tpitg.y - 4*ix;      // 0...3
+
+    const int q_offset = 4 * tpitg.x + 32 * iy;
+    const int y_offset = 4 * tpitg.x + 64 * iy;
+
+    float sumf = 0;
+
+    for (int i = ix; i < nb; i += 2) {
+
+        //const float d1 = (float)x[i].d[2*iy + 0];
+        //const float d2 = (float)x[i].d[2*iy + 1];
+        device const half2 * d = (device const half2 *)x[i].d + iy;
+
+        device const uint8_t * ql = x[i].qs + q_offset;
+        device const float   * yl = y + i * QK_K + y_offset;
+
+        float2 acc = {0.0f, 0.0f};
+
+        for (int j = 0; j < 4; ++j) {
+
+            //acc[0] += yl[j] * d1 * (ql[j] & 0xF) + yl[j+32] * d2 * (ql[j] >> 4);
+            //acc[1] += d1 * yl[j] + d2 * yl[j+32];
+
+            acc[0] += yl[j+ 0] * ((int8_t)(ql[j] & 0xF) - 8);
+            acc[1] += yl[j+32] * ((int8_t)(ql[j] >>  4) - 8);
+
+        }
+
+        //sumf += acc[0] - 8.f*acc[1];
+        sumf += acc[0] * d[0].x + acc[1] * d[0].y;
+    }
+
+    sum[ith] = sumf;
+
+    //
+    // Accumulate the sum from all threads in the threadgroup
+    //
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (ith%4 == 0) {
+        sum[ith] += sum[ith+1] + sum[ith+2] + sum[ith+3];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (ith%16 == 0) {
+        sum[ith] += sum[ith+4] + sum[ith+8] + sum[ith+12];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (ith == 0) {
+        for (uint i = 16; i < nth; i += 16) sum[0] += sum[i];
+        dst[r1*ne0 + r0] = sum[0];
+    }
+}
+
 kernel void kernel_mul_mat_q4_1_f32(
         device const  void * src0,
         device const float * src1,
@@ -626,8 +708,6 @@ kernel void kernel_cpy_f32_f32(
 
 //============================================ k-quants ======================================================
 
-#define QK_K 256
-
 typedef struct {
     uint8_t scales[QK_K/16]; // scales and mins, quantized with 4 bits
     uint8_t qs[QK_K/4];      // quants
@@ -800,6 +880,28 @@ static void dequantize_row_q4_k(device const block_q4_k * x, device float * y, i
     }
 }
 
+static void dequantize_row_q4_K_F(device const block_q4_K_F * x, device float * y, int k) {
+    assert(k % QK_K == 0);
+    const int nb = k / QK_K;
+
+
+    for (int i = 0; i < nb; i++) {
+
+        device const half * d = x[i].d;
+
+        device const uint8_t * q = x[i].qs;
+
+        for (int j = 0; j < QK_K/64; ++j) {
+            const float d1 = (float)d[2*j+0];
+            const float d2 = (float)d[2*j+1];
+            for (int l = 0; l < 32; ++l) *y++ = d1 * ((int8_t)(q[l] & 0xF) - 8);
+            for (int l = 0; l < 32; ++l) *y++ = d2 * ((int8_t)(q[l]  >> 4) - 8);
+            q += 32;
+        }
+
+    }
+}
+
 static void dequantize_row_q5_k(device const block_q5_k * x, device float * y, int k) {
     assert(k % QK_K == 0);
     const int nb = k / QK_K;
@@ -904,6 +1006,22 @@ kernel void kernel_get_rows_q4_k(
 
     dequantize_row_q4_k(
             (device const block_q4_k *) ((device char *) src0 + r*nb01),
+                       (device float *) ((device char *)  dst + i*nb1), ne00);
+}
+
+kernel void kernel_get_rows_q4_K_F(
+        device const  void * src0,
+        device const   int * src1,
+        device       float * dst,
+        constant   int64_t & ne00,
+        constant  uint64_t & nb01,
+        constant  uint64_t & nb1,
+        uint tpig[[thread_position_in_grid]]) {
+    const int i = tpig;
+    const int r = ((device int32_t *) src1)[i];
+
+    dequantize_row_q4_K_F(
+            (device const block_q4_K_F *) ((device char *) src0 + r*nb01),
                        (device float *) ((device char *)  dst + i*nb1), ne00);
 }
 
